@@ -9,7 +9,7 @@ MANPAGES=duperemove.8 btrfs-extent-same.8 hashstats.8 show-shared-extents.8
 ZSH_COMPLETION=completion/zsh/_duperemove
 
 # tests.c is ulgy: it includes lots of c files, to get access to inlined code
-CFILES = $(filter-out tests.c,$(wildcard *.c))
+CFILES = $(filter-out tests.c,$(sort $(wildcard *.c)))
 DEPENDS := $(CFILES:.c=.d)
 OBJECTS := $(CFILES:.c=.o)
 install_progs = duperemove hashstats btrfs-extent-same
@@ -17,7 +17,7 @@ progs = $(install_progs) csum-test
 PROGS_OBJECTS := $(addsuffix .o,$(basename $(progs)))
 SHARED_OBJECTS := $(filter-out $(PROGS_OBJECTS),$(OBJECTS))
 
-DIST_SOURCES:=$(CFILES) $(wildcard *.h) LICENSE Makefile \
+DIST_SOURCES:=$(CFILES) $(sort $(wildcard *.h)) LICENSE Makefile \
 	rbtree.txt README.md $(MANPAGES) SubmittingPatches docs/duperemove.html
 DIST=duperemove-$(VERSION)
 DIST_TARBALL=$(VERSION).tar.gz
