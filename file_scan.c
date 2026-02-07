@@ -221,28 +221,37 @@ static inline dev_t stx_to_dev(struct statx *stx)
 	return makedev(stx->stx_dev_major, stx->stx_dev_minor);
 }
 
-static char *extract_first_device(const char *fs_source)
+/*
+ * Try to get the UUID from a colon-separated device list (e.g. multi-device
+ * bcachefs). Tries each device in order until blkid succeeds on one.
+ */
+static char *get_uuid_from_device_list(const char *fs_source)
 {
-	char *first_device = NULL;
-	const char *colon;
+	const char *p = fs_source;
 
 	if (!fs_source)
 		return NULL;
 
-	colon = strchr(fs_source, ':');
-	if (colon) {
-		size_t len = colon - fs_source;
-		first_device = malloc(len + 1);
-		if (!first_device)
+	while (p && *p) {
+		const char *colon = strchr(p, ':');
+		size_t len = colon ? (size_t)(colon - p) : strlen(p);
+		char *device = malloc(len + 1);
+		char *uuid;
+
+		if (!device)
 			return NULL;
-		memcpy(first_device, fs_source, len);
-		first_device[len] = '\0';
-	} else {
-		first_device = strdup(fs_source);
-		if (!first_device)
-			return NULL;
+		memcpy(device, p, len);
+		device[len] = '\0';
+
+		uuid = blkid_get_tag_value(NULL, "UUID", device);
+		free(device);
+		if (uuid)
+			return uuid;
+
+		p = colon ? colon + 1 : NULL;
 	}
-	return first_device;
+
+	return NULL;
 }
 
 /* Get the UUID associated with the FS that stores path */
@@ -271,7 +280,6 @@ int get_uuid(char *path, uuid_t *uuid)
 		}
 	} else {
 		const char *fs_source;
-		char *first_device;
 
 		dprintf("get_uuid: %s do not live on btrfs\n", path);
 
@@ -303,15 +311,7 @@ int get_uuid(char *path, uuid_t *uuid)
 		}
 
 		fs_source = mnt_fs_get_source(dev);
-		first_device = extract_first_device(fs_source);
-
-		if (!first_device) {
-			eprintf("Memory allocation failed\n");
-			return 1;
-		}
-
-		uuid_found = blkid_get_tag_value(NULL, "UUID", first_device);
-		free(first_device);
+		uuid_found = get_uuid_from_device_list(fs_source);
 		if (!uuid_found) {
 			eprintf("libblkid could not get uuid for "
 					"device %s. Run blkid as root to "
