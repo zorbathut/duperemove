@@ -1014,7 +1014,8 @@ static void csum_whole_file(struct file_to_scan *file)
 	 */
 	static struct dbhandle *db = NULL;
 	static __thread struct buffer buffer = {0,};
-	static __thread struct pscan_thread *tls_progress = NULL;
+	static GPrivate tls_progress_key = G_PRIVATE_INIT(pscan_unregister_thread);
+	struct pscan_thread *tls_progress = g_private_get(&tls_progress_key);
 
 	/* Dummy variables used to trigger the cleanup code */
 	_cleanup_(pscan_reset_thread) struct pscan_thread *tprogress = tls_progress;
@@ -1051,6 +1052,7 @@ static void csum_whole_file(struct file_to_scan *file)
 	if (!tls_progress) {
 		tls_progress = pscan_register_thread(gettid());
 		abort_on(!tls_progress);
+		g_private_set(&tls_progress_key, tls_progress);
 		tprogress = tls_progress;
 	}
 

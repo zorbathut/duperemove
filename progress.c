@@ -118,6 +118,8 @@ static void print_thread_progress(struct pscan_thread *tprogress)
 			tprogress->file_path,
 			pretty_size(tprogress->file_total_bytes));
 		break;
+	case thread_dead:
+		return;
 	}
 
 	/* Truncate the output to keep at most one line per thread */
@@ -166,9 +168,11 @@ static void *print_progress(void)
 	s_restore_pos();
 
 	for (unsigned int i = 0; i < pscan.thread_count; i++) {
-		print_thread_progress(pscan.threads[i]);
 		files_scanned += pscan.threads[i]->total_scanned_files;
 		bytes_scanned += pscan.threads[i]->total_scanned_bytes;
+		if (pscan.threads[i]->status == thread_dead)
+			continue;
+		print_thread_progress(pscan.threads[i]);
 	}
 
 	print_total_progress();
@@ -201,12 +205,35 @@ static void *pscan_progress_thread(void * p)
 	return NULL;
 }
 
+void pscan_unregister_thread(void *data)
+{
+	struct pscan_thread *tprogress = data;
+	if (!tprogress)
+		return;
+	g_mutex_lock(&pscan.mutex);
+	tprogress->status = thread_dead;
+	g_mutex_unlock(&pscan.mutex);
+}
+
 struct pscan_thread *pscan_register_thread(pid_t tid)
 {
-	struct pscan_thread *tprogress = calloc(1, sizeof(struct pscan_thread));
-	tprogress->tid = tid;
+	struct pscan_thread *tprogress;
 
 	g_mutex_lock(&pscan.mutex);
+
+	/* Reuse a slot from a thread that GLib recycled */
+	for (unsigned int i = 0; i < pscan.thread_count; i++) {
+		if (pscan.threads[i]->status == thread_dead) {
+			tprogress = pscan.threads[i];
+			tprogress->tid = tid;
+			tprogress->status = thread_idle;
+			g_mutex_unlock(&pscan.mutex);
+			return tprogress;
+		}
+	}
+
+	tprogress = calloc(1, sizeof(struct pscan_thread));
+	tprogress->tid = tid;
 	pscan.threads = realloc(pscan.threads, (pscan.thread_count + 1) *
 						sizeof(struct pscan_thread *));
 	pscan.threads[pscan.thread_count] = tprogress;

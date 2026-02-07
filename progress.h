@@ -10,6 +10,7 @@ enum pscan_thread_status {
 	thread_scanning,
 	thread_waiting_lock,
 	thread_committing,
+	thread_dead,
 };
 
 struct pscan_thread {
@@ -46,6 +47,9 @@ void pscan_set_progress(uint64_t added_files, uint64_t added_bytes);
 
 /* Used by each scan threads to grab its own struct pscan_thread */
 struct pscan_thread *pscan_register_thread(pid_t tid);
+
+/* GPrivate destructor: marks slot as reusable when a thread exits */
+void pscan_unregister_thread(void *data);
 
 /*
  * Setup the pty and start the progress thread
