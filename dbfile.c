@@ -450,16 +450,16 @@ struct dbhandle *dbfile_open_handle(char *filename)
 	dbfile_prepare_stmt(load_filerec, LOAD_FILEREC);
 
 #define GET_DUPLICATE_BLOCKS						\
-"select blocks.digest, fileid, loff from blocks "			\
-"join files on fileid = id "						\
-"where dedupe_seq <= ?1 and blocks.digest in ( "			\
-"	select blocks.digest from blocks "				\
-"	join files on fileid = id "					\
-"	where dedupe_seq <= ?1 and blocks.digest in ( "			\
-"		select blocks.digest from blocks "			\
-"		join files on fileid = id "				\
-"		where dedupe_seq = ?1) "				\
-"	group by blocks.digest having count(*) > 1);"
+"select b.digest, b.fileid, b.loff from blocks b "			\
+"join files f on b.fileid = f.id "					\
+"join ( "								\
+"	select bx.digest from blocks bx "				\
+"	join files fx on bx.fileid = fx.id "				\
+"	where fx.dedupe_seq <= ?1 "					\
+"	group by bx.digest "						\
+"	having count(*) > 1 and sum(fx.dedupe_seq = ?1) > 0 "		\
+") dup on b.digest = dup.digest "					\
+"where f.dedupe_seq <= ?1;"
 	dbfile_prepare_stmt(get_duplicate_blocks, GET_DUPLICATE_BLOCKS);
 
 /*
@@ -470,16 +470,16 @@ struct dbhandle *dbfile_open_handle(char *filename)
  * result of only one extent.
  */
 #define GET_DUPLICATE_EXTENTS						\
-"select extents.digest, fileid, loff, len, poff from extents "		\
-"join files on fileid = id "						\
-"where dedupe_seq <= ?1 and (extents.digest, len) in ( "		\
-"	select extents.digest, len from extents "			\
-"	join files on fileid = id "					\
-"	where dedupe_seq <= ?1 and (extents.digest, len) in ( "		\
-"		select extents.digest, len from extents "		\
-"		join files on fileid = id "				\
-"		where dedupe_seq = ?1) "				\
-"	group by extents.digest, len having count(*) > 1);"
+"select e.digest, e.fileid, e.loff, e.len, e.poff from extents e "	\
+"join files f on e.fileid = f.id "					\
+"join ( "								\
+"	select ex.digest, ex.len from extents ex "			\
+"	join files fx on ex.fileid = fx.id "				\
+"	where fx.dedupe_seq <= ?1 "					\
+"	group by ex.digest, ex.len "					\
+"	having count(*) > 1 and sum(fx.dedupe_seq = ?1) > 0 "		\
+") dup on e.digest = dup.digest and e.len = dup.len "			\
+"where f.dedupe_seq <= ?1;"
 	dbfile_prepare_stmt(get_duplicate_extents, GET_DUPLICATE_EXTENTS);
 
 /*
@@ -488,13 +488,14 @@ struct dbhandle *dbfile_open_handle(char *filename)
  * to the current batch.
  */
 #define GET_DUPLICATE_FILES							\
-"select id, size, digest, filename from files "					\
-"where dedupe_seq <= ?1 and not (flags & 1) and (digest, size) in ( "		\
+"select f.id, f.size, f.digest, f.filename from files f "			\
+"join ( "									\
 "	select digest, size from files "					\
-"	where dedupe_seq <= ?1 and not (flags & 1) and (digest, size) in ( "	\
-"		select digest, size from files "				\
-"		where dedupe_seq = ?1 and not (flags & 1)) "			\
-"	group by digest, size having count(*) > 1);"
+"	where dedupe_seq <= ?1 and not (flags & 1) "				\
+"	group by digest, size "							\
+"	having count(*) > 1 and sum(dedupe_seq = ?1) > 0 "			\
+") dup on f.digest = dup.digest and f.size = dup.size "				\
+"where f.dedupe_seq <= ?1 and not (f.flags & 1);"
 	dbfile_prepare_stmt(get_duplicate_files, GET_DUPLICATE_FILES);
 
 #define GET_FILE_EXTENT							\
