@@ -389,3 +389,18 @@ void psearch_update_processed_count(unsigned int processed)
 {
 	atomic_fetch_add(&search_processed, processed);
 }
+
+void format_eta(double seconds, char *buf, size_t buflen)
+{
+	if (seconds < 0) {
+		snprintf(buf, buflen, "--:--");
+		return;
+	}
+	int secs = (int)seconds;
+	if (secs < 60)
+		snprintf(buf, buflen, "%ds", secs);
+	else if (secs < 3600)
+		snprintf(buf, buflen, "%dm %02ds", secs / 60, secs % 60);
+	else
+		snprintf(buf, buflen, "%dh %02dm", secs / 3600, (secs % 3600) / 60);
+}

@@ -98,4 +98,10 @@ void psearch_join(void);
  */
 void psearch_update_processed_count(unsigned int processed);
 
+/*
+ * Format a duration in seconds into a human-readable ETA string.
+ * buf must be at least 32 bytes.
+ */
+void format_eta(double seconds, char *buf, size_t buflen);
+
 #endif	/* __PROGRESS_H__ */

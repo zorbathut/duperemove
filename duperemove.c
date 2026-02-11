@@ -26,6 +26,7 @@
 #include <string.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <time.h>
 
 #include <glib.h>
 
@@ -579,12 +580,39 @@ out:
 static void process_duplicates(struct dbhandle *db)
 {
 	unsigned int max = get_max_dedupe_seq(db);
+	unsigned int start_seq = dedupe_seq;
+	unsigned int total = max - start_seq;
+	struct timespec batch_start;
 
 	/* Spawn a dedicated thread pool to block-based lookup */
 	if (options.do_block_hash)
 		extents_search_init();
 
-	for (unsigned int i = dedupe_seq; i < max; i++) {
+	if (!quiet && total > 1)
+		clock_gettime(CLOCK_MONOTONIC, &batch_start);
+
+	for (unsigned int i = start_seq; i < max; i++) {
+		if (!quiet && total > 1) {
+			unsigned int done = i - start_seq;
+			char eta_buf[32];
+
+			if (done > 0) {
+				struct timespec now;
+				clock_gettime(CLOCK_MONOTONIC, &now);
+				double elapsed = (now.tv_sec - batch_start.tv_sec)
+					+ (now.tv_nsec - batch_start.tv_nsec) / 1e9;
+				double remaining = elapsed / done * (total - done);
+				format_eta(remaining, eta_buf, sizeof(eta_buf));
+			} else {
+				snprintf(eta_buf, sizeof(eta_buf), "--:--");
+			}
+
+			printf("[Batch %u/%u  %.1f%%  ETA: %s]\n",
+				done + 1, total,
+				(double)(done + 1) / total * 100.0,
+				eta_buf);
+		}
+
 		/* Drop all filerecs from the previous iteration. Needed filerecs will be
 		 * recreated by __process_duplicates()
 		 */
