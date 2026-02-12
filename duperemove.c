@@ -524,17 +524,27 @@ static void print_header(void)
 	qprintf("Gathering file list...\n");
 }
 
-static void __process_duplicates(struct dbhandle *db, unsigned int seq)
+static void process_duplicates(struct dbhandle *db)
 {
 	int ret;
+	unsigned int max = get_max_dedupe_seq(db);
+	unsigned int start_seq = dedupe_seq;
+	unsigned int end_seq = max + 1;
 	struct results_tree res;
 	struct hash_tree dups_tree;
+
+	if (start_seq >= max)
+		return;
+
+	/* Spawn a dedicated thread pool to block-based lookup */
+	if (options.do_block_hash)
+		extents_search_init();
 
 	init_results_tree(&res);
 	init_hash_tree(&dups_tree);
 
 	qprintf("Loading only identical files from hashfile.\n");
-	ret = dbfile_load_same_files(db, &res, seq + 1);
+	ret = dbfile_load_same_files(db, &res, start_seq, end_seq);
 	if (ret)
 		goto out;
 
@@ -551,13 +561,14 @@ static void __process_duplicates(struct dbhandle *db, unsigned int seq)
 
 		qprintf("Loading only duplicated hashes from hashfile.\n");
 
-		ret = dbfile_load_extent_hashes(db, &res, seq + 1);
+		ret = dbfile_load_extent_hashes(db, &res, start_seq, end_seq);
 		if (ret)
 			goto out;
 
 		printf("Found %llu identical extents.\n", res.num_extents);
 		if (options.do_block_hash) {
-			ret = dbfile_load_block_hashes(db, &dups_tree, seq + 1);
+			ret = dbfile_load_block_hashes(db, &dups_tree,
+						       start_seq, end_seq);
 			if (ret)
 				goto out;
 
@@ -572,64 +583,20 @@ static void __process_duplicates(struct dbhandle *db, unsigned int seq)
 			print_dupes_table(&res, false);
 	}
 
+	if (options.run_dedupe) {
+		/*
+		 * Mark all batches as deduped so we don't repeat work
+		 * on the next run.
+		 */
+		dedupe_seq = max;
+		dbfile_cfg.dedupe_seq = dedupe_seq;
+		dbfile_cfg.blocksize = blocksize;
+		dbfile_sync_config(db, &dbfile_cfg);
+	}
+
 out:
 	free_results_tree(&res);
 	free_hash_tree(&dups_tree);
-}
-
-static void process_duplicates(struct dbhandle *db)
-{
-	unsigned int max = get_max_dedupe_seq(db);
-	unsigned int start_seq = dedupe_seq;
-	unsigned int total = max - start_seq;
-	struct timespec batch_start;
-
-	/* Spawn a dedicated thread pool to block-based lookup */
-	if (options.do_block_hash)
-		extents_search_init();
-
-	if (!quiet && total > 1)
-		clock_gettime(CLOCK_MONOTONIC, &batch_start);
-
-	for (unsigned int i = start_seq; i < max; i++) {
-		if (!quiet && total > 1) {
-			unsigned int done = i - start_seq;
-			char eta_buf[32];
-
-			if (done > 0) {
-				struct timespec now;
-				clock_gettime(CLOCK_MONOTONIC, &now);
-				double elapsed = (now.tv_sec - batch_start.tv_sec)
-					+ (now.tv_nsec - batch_start.tv_nsec) / 1e9;
-				double remaining = elapsed / done * (total - done);
-				format_eta(remaining, eta_buf, sizeof(eta_buf));
-			} else {
-				snprintf(eta_buf, sizeof(eta_buf), "--:--");
-			}
-
-			printf("[Batch %u/%u  %.1f%%  ETA: %s]\n",
-				done + 1, total,
-				(double)(done + 1) / total * 100.0,
-				eta_buf);
-		}
-
-		/* Drop all filerecs from the previous iteration. Needed filerecs will be
-		 * recreated by __process_duplicates()
-		 */
-		free_all_filerecs();
-		__process_duplicates(db, i);
-
-		if (options.run_dedupe) {
-			/*
-			 * Bump dedupe_seq, this effectively marks the files
-			 * in our hashfile as having been through dedupe.
-			 */
-			dedupe_seq++;
-			dbfile_cfg.dedupe_seq = dedupe_seq;
-			dbfile_cfg.blocksize = blocksize;
-			dbfile_sync_config(db, &dbfile_cfg);
-		}
-	}
 
 	if (options.do_block_hash)
 		extents_search_free();

@@ -133,6 +133,38 @@ WHERE dedupe_seq <= ?1 AND blocks.digest IN (
     GROUP BY blocks.digest HAVING count(*) > 1)""",
 }
 
+# Range queries: single pass, ?1 = start_seq, ?2 = end_seq
+# Finds all duplicate groups where at least one member has dedupe_seq >= ?1
+QUERIES_RANGE = {
+    "GET_DUPLICATE_FILES": """\
+SELECT id, size, digest, filename FROM files
+WHERE dedupe_seq < ?2 AND NOT (flags & 1) AND (digest, size) IN (
+    SELECT digest, size FROM files
+    WHERE dedupe_seq < ?2 AND NOT (flags & 1)
+    GROUP BY digest, size HAVING count(*) > 1
+        AND sum(dedupe_seq >= ?1) > 0)""",
+    "GET_DUPLICATE_EXTENTS": """\
+SELECT extents.digest, fileid, loff, len, poff FROM extents
+JOIN files ON fileid = id
+WHERE dedupe_seq < ?2 AND (extents.digest, len) IN (
+    SELECT extents.digest, len FROM extents
+    JOIN files ON fileid = id
+    WHERE dedupe_seq < ?2
+    GROUP BY extents.digest, len HAVING count(*) > 1
+        AND sum(dedupe_seq >= ?1) > 0)""",
+    "GET_DUPLICATE_BLOCKS": """\
+SELECT blocks.digest, fileid, loff FROM blocks
+JOIN files ON fileid = id
+WHERE dedupe_seq < ?2 AND blocks.digest IN (
+    SELECT blocks.digest FROM blocks
+    JOIN files ON fileid = id
+    WHERE dedupe_seq < ?2 AND blocks.digest IN (
+        SELECT blocks.digest FROM blocks
+        JOIN files ON fileid = id
+        WHERE dedupe_seq >= ?1)
+    GROUP BY blocks.digest HAVING count(*) > 1)""",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -513,17 +545,28 @@ def run_benchmark(db_path, max_seq):
     conn.execute("PRAGMA cache_size = -256000")
     conn.execute("PRAGMA mmap_size = 1073741824")  # 1 GB mmap
 
-    seq_values = [max_seq, max(1, max_seq // 2), 1]
-
-    query_sets = [
-        ("JOIN (current)", QUERIES_JOIN),
-        ("Nested IN (original)", QUERIES_NESTED_IN),
+    # Per-seq query sets: param is (seq,)
+    per_seq_sets = [
+        ("Nested IN (per-seq)", QUERIES_NESTED_IN),
+    ]
+    # Range query sets: params are (start, end)
+    range_sets = [
+        ("Range (single pass)", QUERIES_RANGE),
     ]
 
-    # Print EXPLAIN QUERY PLAN for each query at max_seq
+    # For per-seq, test at different seq values
+    seq_values = [max_seq, max(1, max_seq // 2), 1]
+    # For range, test equivalent scenarios: full DB, second half, first batch only
+    range_values = [
+        (1, max_seq + 1),                           # full DB (equivalent to per-seq looping 1..max)
+        (max(1, max_seq // 2), max_seq + 1),         # second half only
+        (max_seq, max_seq + 1),                      # last batch only
+    ]
+
+    # Print EXPLAIN QUERY PLAN
     print("EXPLAIN QUERY PLAN")
     print("=" * 70)
-    for set_name, queries in query_sets:
+    for set_name, queries in per_seq_sets:
         print(f"\n--- {set_name} ---")
         for qname, qsql in queries.items():
             print(f"\n  {qname}:")
@@ -534,49 +577,77 @@ def run_benchmark(db_path, max_seq):
                     print(f"{indent}{row[3]}")
             except Exception as e:
                 print(f"    ERROR: {e}")
+    for set_name, queries in range_sets:
+        print(f"\n--- {set_name} ---")
+        for qname, qsql in queries.items():
+            print(f"\n  {qname}:")
+            try:
+                plan = conn.execute(f"EXPLAIN QUERY PLAN {qsql}", (1, max_seq + 1)).fetchall()
+                for row in plan:
+                    indent = "    " + "  " * row[1]
+                    print(f"{indent}{row[3]}")
+            except Exception as e:
+                print(f"    ERROR: {e}")
     print()
 
     # Run benchmarks
     print("BENCHMARK RESULTS")
     print("=" * 70)
-    header = f"{'Query':<25} {'Variant':<20} {'Seq':>6} {'Rows':>10} {'Time':>12}"
+    header = f"{'Query':<25} {'Variant':<20} {'Params':>16} {'Rows':>10} {'Time':>12}"
     print(header)
     print("-" * 70)
 
-    results = {}  # (qname, set_name, seq) -> sorted rows for verification
+    # Collect results for cross-validation between per-seq at max and range full-DB
+    results = {}
 
-    for set_name, queries in query_sets:
+    # Per-seq benchmarks
+    for set_name, queries in per_seq_sets:
         for qname in ["GET_DUPLICATE_FILES", "GET_DUPLICATE_EXTENTS", "GET_DUPLICATE_BLOCKS"]:
             qsql = queries[qname]
             for seq in seq_values:
-                # Warm up: drop OS caches by re-reading (SQLite internal cache already set)
                 conn.execute("SELECT 1")
-
                 t0 = time.monotonic()
                 try:
                     rows = conn.execute(qsql, (seq,)).fetchall()
                     elapsed = time.monotonic() - t0
                     n_rows = len(rows)
-
-                    # Store sorted results for verification
-                    key = (qname, seq)
-                    sorted_rows = sorted(rows)
-                    if key not in results:
-                        results[key] = (set_name, sorted_rows)
-                    else:
-                        # Compare with first variant
-                        prev_name, prev_rows = results[key]
-                        if sorted_rows == prev_rows:
-                            match = "MATCH"
-                        else:
-                            match = f"MISMATCH (prev={len(prev_rows)})"
-                        n_rows = f"{n_rows} {match}"
+                    results[(qname, "per-seq", seq)] = sorted(rows)
                 except Exception as e:
                     elapsed = time.monotonic() - t0
                     n_rows = f"ERR: {e}"
 
-                print(f"{qname:<25} {set_name:<20} {seq:>6} {str(n_rows):>10} "
-                      f"{fmt_duration(elapsed):>12}")
+                print(f"{qname:<25} {set_name:<20} {f'seq={seq}':>16} "
+                      f"{str(n_rows):>10} {fmt_duration(elapsed):>12}")
+
+    # Range benchmarks
+    for set_name, queries in range_sets:
+        for qname in ["GET_DUPLICATE_FILES", "GET_DUPLICATE_EXTENTS", "GET_DUPLICATE_BLOCKS"]:
+            qsql = queries[qname]
+            for start, end in range_values:
+                conn.execute("SELECT 1")
+                t0 = time.monotonic()
+                try:
+                    rows = conn.execute(qsql, (start, end)).fetchall()
+                    elapsed = time.monotonic() - t0
+                    n_rows = len(rows)
+
+                    sorted_rows = sorted(rows)
+                    results[(qname, "range", start, end)] = sorted_rows
+
+                    # Cross-validate: range(1, max+1) should match per-seq(max)
+                    if start == 1 and end == max_seq + 1:
+                        per_seq_key = (qname, "per-seq", max_seq)
+                        if per_seq_key in results:
+                            if sorted_rows == results[per_seq_key]:
+                                n_rows = f"{n_rows} MATCH"
+                            else:
+                                n_rows = f"{n_rows} MISMATCH ({len(results[per_seq_key])})"
+                except Exception as e:
+                    elapsed = time.monotonic() - t0
+                    n_rows = f"ERR: {e}"
+
+                print(f"{qname:<25} {set_name:<20} {f'{start}..{end}':>16} "
+                      f"{str(n_rows):>10} {fmt_duration(elapsed):>12}")
 
     print()
     conn.close()
