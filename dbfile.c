@@ -1164,6 +1164,7 @@ int dbfile_load_block_hashes(struct dbhandle *db, struct hash_tree *hash_tree,
 	int64_t fileid;
 	unsigned char *digest;
 	struct filerec *file;
+	uint64_t rows = 0;
 
 	ret = sqlite3_bind_int64(stmt, 1, start_seq);
 	if (ret) {
@@ -1195,11 +1196,18 @@ int dbfile_load_block_hashes(struct dbhandle *db, struct hash_tree *hash_tree,
 		ret = insert_hashed_block(hash_tree, digest, file, loff);
 		if (ret)
 			return ENOMEM;
+
+		if (!quiet && (++rows % 10000) == 0)
+			printf("  Loaded %"PRIu64" duplicate blocks...\r",
+			       rows);
 	}
 	if (ret != SQLITE_DONE) {
 		perror_sqlite(ret, "looking up hash");
 		return ret;
 	}
+
+	if (!quiet && rows >= 10000)
+		printf("  Loaded %"PRIu64" duplicate blocks.   \n", rows);
 
 	sort_file_hash_heads(hash_tree);
 
@@ -1215,6 +1223,7 @@ int dbfile_load_extent_hashes(struct dbhandle *db, struct results_tree *res,
 	int64_t fileid;
 	unsigned char *digest;
 	struct filerec *file;
+	uint64_t rows = 0;
 
 	ret = sqlite3_bind_int64(stmt, 1, start_seq);
 	if (ret) {
@@ -1248,11 +1257,18 @@ int dbfile_load_extent_hashes(struct dbhandle *db, struct results_tree *res,
 		ret = insert_one_result(res, digest, file, loff, len, poff);
 		if (ret)
 			return ENOMEM;
+
+		if (!quiet && (++rows % 10000) == 0)
+			printf("  Loaded %"PRIu64" duplicate extents...\r",
+			       rows);
 	}
 	if (ret != SQLITE_DONE) {
 		perror_sqlite(ret, "looking up hash");
 		return ret;
 	}
+
+	if (!quiet && rows >= 10000)
+		printf("  Loaded %"PRIu64" duplicate extents.   \n", rows);
 
 	return 0;
 }
@@ -1467,6 +1483,7 @@ int dbfile_load_same_files(struct dbhandle *db, struct results_tree *res,
 	unsigned char *digest;
 	struct filerec *file;
 	const unsigned char *filename;
+	uint64_t rows = 0;
 
 	ret = sqlite3_bind_int64(stmt, 1, start_seq);
 	if (ret) {
@@ -1495,11 +1512,18 @@ int dbfile_load_same_files(struct dbhandle *db, struct results_tree *res,
 		ret = insert_one_result(res, digest, file, 0, size, 0);
 		if (ret)
 			return ENOMEM;
+
+		if (!quiet && (++rows % 10000) == 0)
+			printf("  Loaded %"PRIu64" duplicate files...\r",
+			       rows);
 	}
 	if (ret != SQLITE_DONE) {
 		perror_sqlite(ret, "looking up hash");
 		return ret;
 	}
+
+	if (!quiet && rows >= 10000)
+		printf("  Loaded %"PRIu64" duplicate files.   \n", rows);
 
 	return 0;
 }
