@@ -682,35 +682,19 @@ void dedupe_streaming(struct dbhandle *db, bool whole_file)
 	       pretty_size(counts.fiemap_bytes));
 }
 
-static int streaming_print_cb(struct dupe_extents *dext, void *priv)
+static int streaming_print_cb(struct dupe_extents *dext,
+			      void *priv [[maybe_unused]])
 {
-	bool whole_file = *(bool *)priv;
-	struct extent *extent;
-	char *kind = whole_file ? "files" : "extents";
-
-	printf("Showing %u identical %s of length %s with id ",
-	       dext->de_num_dupes, kind, pretty_size(dext->de_len));
-	debug_print_digest_short(stdout, dext->de_hash);
-	printf("\n");
-	printf("Start\t\tFilename\n");
-	list_for_each_entry(extent, &dext->de_extents, e_list) {
-		printf("%s\t\"%s\"\n",
-		       pretty_size(extent->e_loff),
-		       extent->e_file->filename);
-	}
-
 	dupe_extents_free_standalone(dext);
 	return 0;
 }
 
 void print_dupes_streaming(struct dbhandle *db, bool whole_file)
 {
-	bool wf = whole_file;
-
 	if (whole_file)
-		dbfile_stream_same_files(db, streaming_print_cb, &wf);
+		dbfile_stream_same_files(db, streaming_print_cb, NULL);
 	else
-		dbfile_stream_extent_hashes(db, streaming_print_cb, &wf);
+		dbfile_stream_extent_hashes(db, streaming_print_cb, NULL);
 }
 
 int fdupes_dedupe(void)

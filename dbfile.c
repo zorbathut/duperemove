@@ -24,6 +24,7 @@
 
 #include "dbfile.h"
 #include "opt.h"
+#include "progress.h"
 
 static struct dbhandle *gdb = NULL;
 
@@ -1566,6 +1567,47 @@ int dbfile_prune_unscanned_files(struct dbhandle *db)
 	return 0;
 }
 
+static void print_progress_bar(unsigned char *digest, uint64_t groups,
+			       struct timespec *ts_start, struct timespec *ts_last)
+{
+	struct timespec ts_now;
+	clock_gettime(CLOCK_MONOTONIC, &ts_now);
+	if (ts_now.tv_sec <= ts_last->tv_sec)
+		return;
+
+	unsigned int pos = ((unsigned int)(unsigned char)digest[0] << 8) |
+			   (unsigned int)(unsigned char)digest[1];
+	unsigned int pct100 = pos * 10000 / 65535;
+	unsigned int filled = pct100 / 500;
+	char bar[21];
+	memset(bar, '#', filled);
+	memset(bar + filled, '.', 20 - filled);
+	bar[20] = '\0';
+
+	long elapsed = ts_now.tv_sec - ts_start->tv_sec;
+	if (pos > 0 && elapsed > 0) {
+		char eta_buf[32];
+		format_eta((double)elapsed * (65535 - pos) / pos,
+			   eta_buf, sizeof(eta_buf));
+		printf("  [%s] %3u.%02u%% (%"PRIu64" groups) ETA: %s   \r",
+		       bar, pct100 / 100, pct100 % 100, groups, eta_buf);
+	} else {
+		printf("  [%s] %3u.%02u%% (%"PRIu64" groups)   \r",
+		       bar, pct100 / 100, pct100 % 100, groups);
+	}
+	fflush(stdout);
+	*ts_last = ts_now;
+}
+
+static void print_progress_complete(uint64_t groups, struct timespec *ts_start)
+{
+	struct timespec ts_end;
+	clock_gettime(CLOCK_MONOTONIC, &ts_end);
+	long elapsed = ts_end.tv_sec - ts_start->tv_sec;
+	printf("  [####################] 100.00%% (%"PRIu64" groups)"
+	       " in %lds              \n", groups, elapsed);
+}
+
 int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 				void *priv)
 {
@@ -1579,10 +1621,11 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 	struct dupe_extents *dext = NULL;
 	unsigned char cur_digest[DIGEST_LEN];
 	uint64_t cur_len = 0;
-	struct timespec ts_last;
+	struct timespec ts_start, ts_last;
 
 	memset(cur_digest, 0, DIGEST_LEN);
-	clock_gettime(CLOCK_MONOTONIC, &ts_last);
+	clock_gettime(CLOCK_MONOTONIC, &ts_start);
+	ts_last = ts_start;
 
 	qprintf("  Querying duplicate extents from hashfile...");
 	fflush(stdout);
@@ -1646,17 +1689,9 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 			list_add_tail(&extent->e_list, &dext->de_extents);
 		}
 
-		if (!quiet) {
-			struct timespec ts_now;
-			clock_gettime(CLOCK_MONOTONIC, &ts_now);
-			if (ts_now.tv_sec > ts_last.tv_sec) {
-				printf("  Loading extents: %"PRIu64" rows, "
-				       "%"PRIu64" groups...\r",
-				       rows, groups);
-				fflush(stdout);
-				ts_last = ts_now;
-			}
-		}
+		if (!quiet)
+			print_progress_bar(cur_digest, groups,
+					   &ts_start, &ts_last);
 	}
 
 	/* Flush final group */
@@ -1680,8 +1715,7 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 	}
 
 	if (!quiet)
-		printf("  Loaded %"PRIu64" rows, %"PRIu64
-		       " groups.              \n", rows, groups);
+		print_progress_complete(groups, &ts_start);
 
 	return 0;
 }
@@ -1701,10 +1735,11 @@ int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
 	struct dupe_extents *dext = NULL;
 	unsigned char cur_digest[DIGEST_LEN];
 	uint64_t cur_size = 0;
-	struct timespec ts_last;
+	struct timespec ts_start, ts_last;
 
 	memset(cur_digest, 0, DIGEST_LEN);
-	clock_gettime(CLOCK_MONOTONIC, &ts_last);
+	clock_gettime(CLOCK_MONOTONIC, &ts_start);
+	ts_last = ts_start;
 
 	qprintf("  Querying duplicate files from hashfile...");
 	fflush(stdout);
@@ -1766,17 +1801,9 @@ int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
 			list_add_tail(&extent->e_list, &dext->de_extents);
 		}
 
-		if (!quiet) {
-			struct timespec ts_now;
-			clock_gettime(CLOCK_MONOTONIC, &ts_now);
-			if (ts_now.tv_sec > ts_last.tv_sec) {
-				printf("  Loading files: %"PRIu64" rows, "
-				       "%"PRIu64" groups...\r",
-				       rows, groups);
-				fflush(stdout);
-				ts_last = ts_now;
-			}
-		}
+		if (!quiet)
+			print_progress_bar(cur_digest, groups,
+					   &ts_start, &ts_last);
 	}
 
 	/* Flush final group */
@@ -1800,8 +1827,7 @@ int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
 	}
 
 	if (!quiet)
-		printf("  Loaded %"PRIu64" rows, %"PRIu64
-		       " groups.              \n", rows, groups);
+		print_progress_complete(groups, &ts_start);
 
 	return 0;
 }
