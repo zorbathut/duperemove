@@ -450,16 +450,10 @@ struct dbhandle *dbfile_open_handle(char *filename)
 	dbfile_prepare_stmt(load_filerec, LOAD_FILEREC);
 
 #define GET_DUPLICATE_BLOCKS						\
-"select blocks.digest, fileid, loff from blocks "			\
-"join files on fileid = id "						\
-"where dedupe_seq < ?2 and blocks.digest in ( "				\
-"	select blocks.digest from blocks "				\
-"	join files on fileid = id "					\
-"	where dedupe_seq < ?2 and blocks.digest in ( "			\
-"		select blocks.digest from blocks "			\
-"		join files on fileid = id "				\
-"		where dedupe_seq >= ?1) "				\
-"	group by blocks.digest having count(*) > 1);"
+"select digest, fileid, loff from blocks "				\
+"where digest in ( "							\
+"	select digest from blocks "					\
+"	group by digest having count(*) > 1);"
 	dbfile_prepare_stmt(get_duplicate_blocks, GET_DUPLICATE_BLOCKS);
 
 /*
@@ -470,14 +464,10 @@ struct dbhandle *dbfile_open_handle(char *filename)
  * result of only one extent.
  */
 #define GET_DUPLICATE_EXTENTS						\
-"select extents.digest, fileid, loff, len, poff from extents "		\
-"join files on fileid = id "						\
-"where dedupe_seq < ?2 and (extents.digest, len) in ( "			\
-"	select extents.digest, len from extents "			\
-"	join files on fileid = id "					\
-"	where dedupe_seq < ?2 "						\
-"	group by extents.digest, len having count(*) > 1 "		\
-"		and sum(dedupe_seq >= ?1) > 0);"
+"select digest, fileid, loff, len, poff from extents "			\
+"where (digest, len) in ( "						\
+"	select digest, len from extents "				\
+"	group by digest, len having count(*) > 1);"
 	dbfile_prepare_stmt(get_duplicate_extents, GET_DUPLICATE_EXTENTS);
 
 /*
@@ -486,12 +476,10 @@ struct dbhandle *dbfile_open_handle(char *filename)
  * to the current batch.
  */
 #define GET_DUPLICATE_FILES							\
-"select id, size, digest, filename from files "					\
-"where dedupe_seq < ?2 and not (flags & 1) and (digest, size) in ( "		\
+"select id, size, digest, filename, flags from files "				\
+"where (digest, size) in ( "							\
 "	select digest, size from files "					\
-"	where dedupe_seq < ?2 and not (flags & 1) "				\
-"	group by digest, size having count(*) > 1 "				\
-"		and sum(dedupe_seq >= ?1) > 0);"
+"	group by digest, size having count(*) > 1);"
 	dbfile_prepare_stmt(get_duplicate_files, GET_DUPLICATE_FILES);
 
 #define GET_FILE_EXTENT							\
@@ -1155,8 +1143,7 @@ int dbfile_load_one_filerec(struct dbhandle *db, int64_t fileid,
 	return 0;
 }
 
-int dbfile_load_block_hashes(struct dbhandle *db, struct hash_tree *hash_tree,
-			     unsigned int start_seq, unsigned int end_seq)
+int dbfile_load_block_hashes(struct dbhandle *db, struct hash_tree *hash_tree)
 {
 	int ret;
 	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_duplicate_blocks;
@@ -1165,17 +1152,6 @@ int dbfile_load_block_hashes(struct dbhandle *db, struct hash_tree *hash_tree,
 	unsigned char *digest;
 	struct filerec *file;
 	uint64_t rows = 0;
-
-	ret = sqlite3_bind_int64(stmt, 1, start_seq);
-	if (ret) {
-		perror_sqlite(ret, "binding value");
-		return ret;
-	}
-	ret = sqlite3_bind_int64(stmt, 2, end_seq);
-	if (ret) {
-		perror_sqlite(ret, "binding value");
-		return ret;
-	}
 
 	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
 		digest = (unsigned char *)sqlite3_column_blob(stmt, 0);
@@ -1214,8 +1190,7 @@ int dbfile_load_block_hashes(struct dbhandle *db, struct hash_tree *hash_tree,
 	return 0;
 }
 
-int dbfile_load_extent_hashes(struct dbhandle *db, struct results_tree *res,
-			      unsigned int start_seq, unsigned int end_seq)
+int dbfile_load_extent_hashes(struct dbhandle *db, struct results_tree *res)
 {
 	int ret;
 	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_duplicate_extents;
@@ -1224,17 +1199,6 @@ int dbfile_load_extent_hashes(struct dbhandle *db, struct results_tree *res,
 	unsigned char *digest;
 	struct filerec *file;
 	uint64_t rows = 0;
-
-	ret = sqlite3_bind_int64(stmt, 1, start_seq);
-	if (ret) {
-		perror_sqlite(ret, "binding value");
-		return ret;
-	}
-	ret = sqlite3_bind_int64(stmt, 2, end_seq);
-	if (ret) {
-		perror_sqlite(ret, "binding value");
-		return ret;
-	}
 
 	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
 		digest = (unsigned char *)sqlite3_column_blob(stmt, 0);
@@ -1473,34 +1437,27 @@ out:
 	return ret;
 }
 
-int dbfile_load_same_files(struct dbhandle *db, struct results_tree *res,
-			   unsigned int start_seq, unsigned int end_seq)
+int dbfile_load_same_files(struct dbhandle *db, struct results_tree *res)
 {
 	int ret;
 	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_duplicate_files;
 	uint64_t size;
 	int64_t fileid;
 	unsigned char *digest;
+	unsigned int flags;
 	struct filerec *file;
 	const unsigned char *filename;
 	uint64_t rows = 0;
-
-	ret = sqlite3_bind_int64(stmt, 1, start_seq);
-	if (ret) {
-		perror_sqlite(ret, "binding value");
-		return ret;
-	}
-	ret = sqlite3_bind_int64(stmt, 2, end_seq);
-	if (ret) {
-		perror_sqlite(ret, "binding value");
-		return ret;
-	}
 
 	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
 		fileid = sqlite3_column_int64(stmt, 0);
 		size = sqlite3_column_int64(stmt, 1);
 		digest = (unsigned char *)sqlite3_column_blob(stmt, 2);
 		filename = sqlite3_column_text(stmt, 3);
+		flags = sqlite3_column_int(stmt, 4);
+
+		if (flags & FILE_INLINED)
+			continue;
 
 		file = filerec_find(fileid);
 		if (!file) {

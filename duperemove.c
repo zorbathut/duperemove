@@ -528,12 +528,10 @@ static void process_duplicates(struct dbhandle *db)
 {
 	int ret;
 	unsigned int max = get_max_dedupe_seq(db);
-	unsigned int start_seq = dedupe_seq;
-	unsigned int end_seq = max + 1;
 	struct results_tree res;
 	struct hash_tree dups_tree;
 
-	if (start_seq >= max)
+	if (dedupe_seq >= max)
 		return;
 
 	/* Spawn a dedicated thread pool to block-based lookup */
@@ -544,7 +542,7 @@ static void process_duplicates(struct dbhandle *db)
 	init_hash_tree(&dups_tree);
 
 	qprintf("Loading only identical files from hashfile.\n");
-	ret = dbfile_load_same_files(db, &res, start_seq, end_seq);
+	ret = dbfile_load_same_files(db, &res);
 	if (ret)
 		goto out;
 
@@ -561,14 +559,13 @@ static void process_duplicates(struct dbhandle *db)
 
 		qprintf("Loading only duplicated hashes from hashfile.\n");
 
-		ret = dbfile_load_extent_hashes(db, &res, start_seq, end_seq);
+		ret = dbfile_load_extent_hashes(db, &res);
 		if (ret)
 			goto out;
 
 		printf("Found %llu identical extents.\n", res.num_extents);
 		if (options.do_block_hash) {
-			ret = dbfile_load_block_hashes(db, &dups_tree,
-						       start_seq, end_seq);
+			ret = dbfile_load_block_hashes(db, &dups_tree);
 			if (ret)
 				goto out;
 

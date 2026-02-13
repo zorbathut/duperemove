@@ -108,10 +108,8 @@ struct hash_tree;
  * Load hashes into hash_tree only if they have a duplicate in the db.
  * The extent search is later run on the resulting hash_tree.
  */
-int dbfile_load_block_hashes(struct dbhandle *db, struct hash_tree *hash_tree,
-			     unsigned int start_seq, unsigned int end_seq);
-int dbfile_load_extent_hashes(struct dbhandle *db, struct results_tree *res,
-			      unsigned int start_seq, unsigned int end_seq);
+int dbfile_load_block_hashes(struct dbhandle *db, struct hash_tree *hash_tree);
+int dbfile_load_extent_hashes(struct dbhandle *db, struct results_tree *res);
 
 struct file_extent {
 	uint64_t	poff;
@@ -160,8 +158,7 @@ void dbfile_list_files(struct dbhandle *db, int (*callback)(void*, int, char**, 
 
 int dbfile_describe_file(struct dbhandle *db, uint64_t ino, uint64_t subvol,
 				struct file *dbfile);
-int dbfile_load_same_files(struct dbhandle *db, struct results_tree *res,
-			   unsigned int start_seq, unsigned int end_seq);
+int dbfile_load_same_files(struct dbhandle *db, struct results_tree *res);
 
 int dbfile_rename_file(struct dbhandle *db, int64_t fileid, char *path);
 

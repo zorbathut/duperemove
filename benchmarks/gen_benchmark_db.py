@@ -165,6 +165,26 @@ WHERE dedupe_seq < ?2 AND blocks.digest IN (
     GROUP BY blocks.digest HAVING count(*) > 1)""",
 }
 
+# No-filter queries: pure covering index scans, no dedupe_seq filter
+# Relies on clean_deduped() in run_dedupe.c to handle already-deduped groups
+QUERIES_NOFILTER = {
+    "GET_DUPLICATE_FILES": """\
+SELECT id, size, digest, filename, flags FROM files
+WHERE (digest, size) IN (
+    SELECT digest, size FROM files
+    GROUP BY digest, size HAVING count(*) > 1)""",
+    "GET_DUPLICATE_EXTENTS": """\
+SELECT digest, fileid, loff, len, poff FROM extents
+WHERE (digest, len) IN (
+    SELECT digest, len FROM extents
+    GROUP BY digest, len HAVING count(*) > 1)""",
+    "GET_DUPLICATE_BLOCKS": """\
+SELECT digest, fileid, loff FROM blocks
+WHERE digest IN (
+    SELECT digest FROM blocks
+    GROUP BY digest HAVING count(*) > 1)""",
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -553,6 +573,10 @@ def run_benchmark(db_path, max_seq):
     range_sets = [
         ("Range (single pass)", QUERIES_RANGE),
     ]
+    # No-filter query sets: no params
+    nofilter_sets = [
+        ("No filter", QUERIES_NOFILTER),
+    ]
 
     # For per-seq, test at different seq values
     seq_values = [max_seq, max(1, max_seq // 2), 1]
@@ -583,6 +607,17 @@ def run_benchmark(db_path, max_seq):
             print(f"\n  {qname}:")
             try:
                 plan = conn.execute(f"EXPLAIN QUERY PLAN {qsql}", (1, max_seq + 1)).fetchall()
+                for row in plan:
+                    indent = "    " + "  " * row[1]
+                    print(f"{indent}{row[3]}")
+            except Exception as e:
+                print(f"    ERROR: {e}")
+    for set_name, queries in nofilter_sets:
+        print(f"\n--- {set_name} ---")
+        for qname, qsql in queries.items():
+            print(f"\n  {qname}:")
+            try:
+                plan = conn.execute(f"EXPLAIN QUERY PLAN {qsql}").fetchall()
                 for row in plan:
                     indent = "    " + "  " * row[1]
                     print(f"{indent}{row[3]}")
@@ -648,6 +683,47 @@ def run_benchmark(db_path, max_seq):
 
                 print(f"{qname:<25} {set_name:<20} {f'{start}..{end}':>16} "
                       f"{str(n_rows):>10} {fmt_duration(elapsed):>12}")
+
+    # No-filter benchmarks
+    for set_name, queries in nofilter_sets:
+        for qname in ["GET_DUPLICATE_FILES", "GET_DUPLICATE_EXTENTS", "GET_DUPLICATE_BLOCKS"]:
+            qsql = queries[qname]
+            conn.execute("SELECT 1")
+            t0 = time.monotonic()
+            try:
+                rows = conn.execute(qsql).fetchall()
+                elapsed = time.monotonic() - t0
+                n_rows = len(rows)
+
+                sorted_rows = sorted(rows)
+                results[(qname, "nofilter")] = sorted_rows
+
+                # Cross-validate: nofilter should be superset of range(1, max+1)
+                range_key = (qname, "range", 1, max_seq + 1)
+                if range_key in results:
+                    range_rows = results[range_key]
+                    # For files, nofilter returns extra 'flags' column; compare common cols
+                    if qname == "GET_DUPLICATE_FILES":
+                        nf_trimmed = sorted(r[:4] for r in sorted_rows)
+                        if nf_trimmed == range_rows:
+                            n_rows = f"{n_rows} MATCH"
+                        elif set(map(tuple, range_rows)).issubset(set(map(tuple, nf_trimmed))):
+                            n_rows = f"{n_rows} SUPERSET(+{len(nf_trimmed) - len(range_rows)})"
+                        else:
+                            n_rows = f"{n_rows} DIFF(range={len(range_rows)})"
+                    else:
+                        if sorted_rows == range_rows:
+                            n_rows = f"{n_rows} MATCH"
+                        elif set(map(tuple, range_rows)).issubset(set(map(tuple, sorted_rows))):
+                            n_rows = f"{n_rows} SUPERSET(+{len(sorted_rows) - len(range_rows)})"
+                        else:
+                            n_rows = f"{n_rows} DIFF(range={len(range_rows)})"
+            except Exception as e:
+                elapsed = time.monotonic() - t0
+                n_rows = f"ERR: {e}"
+
+            print(f"{qname:<25} {set_name:<20} {'(all)':>16} "
+                  f"{str(n_rows):>10} {fmt_duration(elapsed):>12}")
 
     print()
     conn.close()
