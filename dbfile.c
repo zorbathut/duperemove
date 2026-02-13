@@ -484,6 +484,22 @@ struct dbhandle *dbfile_open_handle(char *filename)
 "	group by digest, size having count(*) > 1);"
 	dbfile_prepare_stmt(get_duplicate_files, GET_DUPLICATE_FILES);
 
+/*
+ * Streaming path: scan all extents/files in index order.
+ * No subquery, no temp table — first row returns immediately.
+ * The streaming code discards groups with fewer than 2 members.
+ */
+#define GET_ALL_EXTENTS							\
+"select digest, fileid, loff, len, poff from extents "			\
+"order by digest, len;"
+	dbfile_prepare_stmt(get_all_extents, GET_ALL_EXTENTS);
+
+#define GET_ALL_FILES							\
+"select id, size, digest, filename, flags from files "			\
+"where digest is not null "						\
+"order by digest, size;"
+	dbfile_prepare_stmt(get_all_files, GET_ALL_FILES);
+
 #define GET_FILE_EXTENT							\
 "select poff, loff, len from extents "					\
 "join files on files.id = extents.fileid "				\
@@ -1554,7 +1570,7 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 				void *priv)
 {
 	int ret;
-	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_duplicate_extents;
+	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_all_extents;
 	uint64_t loff, poff, len;
 	int64_t fileid;
 	unsigned char *digest;
@@ -1674,7 +1690,7 @@ int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
 			     void *priv)
 {
 	int ret;
-	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_duplicate_files;
+	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_all_files;
 	uint64_t size;
 	int64_t fileid;
 	unsigned char *digest;

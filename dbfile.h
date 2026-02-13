@@ -38,6 +38,8 @@ struct stmts {
 	sqlite3_stmt *get_duplicate_blocks;
 	sqlite3_stmt *get_duplicate_extents;
 	sqlite3_stmt *get_duplicate_files;
+	sqlite3_stmt *get_all_extents;
+	sqlite3_stmt *get_all_files;
 	sqlite3_stmt *get_file_extent;
 	sqlite3_stmt *get_nondupe_extents;
 	sqlite3_stmt *delete_file;
