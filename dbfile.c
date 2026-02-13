@@ -469,8 +469,7 @@ struct dbhandle *dbfile_open_handle(char *filename)
 "select digest, fileid, loff, len, poff from extents "			\
 "where (digest, len) in ( "						\
 "	select digest, len from extents "				\
-"	group by digest, len having count(*) > 1) "			\
-"order by digest, len;"
+"	group by digest, len having count(*) > 1);"
 	dbfile_prepare_stmt(get_duplicate_extents, GET_DUPLICATE_EXTENTS);
 
 /*
@@ -482,8 +481,7 @@ struct dbhandle *dbfile_open_handle(char *filename)
 "select id, size, digest, filename, flags from files "				\
 "where (digest, size) in ( "							\
 "	select digest, size from files "					\
-"	group by digest, size having count(*) > 1) "				\
-"order by digest, size;"
+"	group by digest, size having count(*) > 1);"
 	dbfile_prepare_stmt(get_duplicate_files, GET_DUPLICATE_FILES);
 
 #define GET_FILE_EXTENT							\
@@ -1570,7 +1568,12 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 	memset(cur_digest, 0, DIGEST_LEN);
 	clock_gettime(CLOCK_MONOTONIC, &ts_last);
 
+	qprintf("  Querying duplicate extents from hashfile...");
+	fflush(stdout);
+
 	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+		if (rows == 0)
+			qprintf(" done.\n");
 		digest = (unsigned char *)sqlite3_column_blob(stmt, 0);
 		fileid = sqlite3_column_int64(stmt, 1);
 		loff = sqlite3_column_int64(stmt, 2);
@@ -1652,6 +1655,9 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 		}
 	}
 
+	if (rows == 0)
+		qprintf(" done.\n");
+
 	if (ret != SQLITE_DONE) {
 		perror_sqlite(ret, "streaming extent hashes");
 		return ret;
@@ -1684,7 +1690,12 @@ int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
 	memset(cur_digest, 0, DIGEST_LEN);
 	clock_gettime(CLOCK_MONOTONIC, &ts_last);
 
+	qprintf("  Querying duplicate files from hashfile...");
+	fflush(stdout);
+
 	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+		if (rows == 0)
+			qprintf(" done.\n");
 		fileid = sqlite3_column_int64(stmt, 0);
 		size = sqlite3_column_int64(stmt, 1);
 		digest = (unsigned char *)sqlite3_column_blob(stmt, 2);
@@ -1763,6 +1774,9 @@ int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
 			dupe_extents_free_standalone(dext);
 		}
 	}
+
+	if (rows == 0)
+		qprintf(" done.\n");
 
 	if (ret != SQLITE_DONE) {
 		perror_sqlite(ret, "streaming same files");
