@@ -200,16 +200,12 @@ static void clean_deduped(struct dupe_extents **ret_dext)
 	int extents_kept = 0;
 	int first = 1;
 	struct dupe_extents *dext = *ret_dext;
-	struct rb_node *inner, *outer;
-	struct extent *inner_extent, *outer_extent;
+	struct extent *outer_extent, *inner_extent, *tmp;
 
 	if (!dext || dext->de_num_dupes == 0)
 		return;
 
-	outer = rb_first(&dext->de_extents_root);
-	while (outer) {
-		outer_extent = rb_entry(outer, struct extent, e_node);
-
+	list_for_each_entry(outer_extent, &dext->de_extents, e_list) {
 		/*
 		 * First extent will not be considered for removal
 		 * below, which is fine as remove_extent() handles the
@@ -226,11 +222,9 @@ static void clean_deduped(struct dupe_extents **ret_dext)
 			extents_kept++;
 		first = 0;
 
-		inner = rb_next(outer);
-		while (inner) {
-			inner_extent = rb_entry(inner, struct extent, e_node);
-			inner = rb_next(inner);
-
+		inner_extent = list_next_entry(outer_extent, e_list);
+		list_for_each_entry_safe_from(inner_extent, tmp,
+					      &dext->de_extents, e_list) {
 			/*
 			 * Track if any extents have survived the
 			 * culling. If we're down to the last two and
@@ -266,7 +260,6 @@ static void clean_deduped(struct dupe_extents **ret_dext)
 			} else
 				extents_kept++;
 		}
-		outer = rb_next(outer);
 	}
 }
 
@@ -521,9 +514,13 @@ static int extent_dedupe_worker(struct dupe_extents *dext,
 	dbfile_unlock();
 
 	if (!list_empty(&dext->de_extents)) {
-		g_mutex_lock(&mutex);
-		dupe_extents_free(dext, results_tree);
-		g_mutex_unlock(&mutex);
+		if (results_tree) {
+			g_mutex_lock(&mutex);
+			dupe_extents_free(dext, results_tree);
+			g_mutex_unlock(&mutex);
+		} else {
+			dupe_extents_free_standalone(dext);
+		}
 	}
 
 	return 0;
@@ -632,6 +629,88 @@ void dedupe_results(struct results_tree *res, bool whole_file)
 		       "change in shared extents of: %s\n",
 		       pretty_size(counts.fiemap_bytes));
 	}
+}
+
+static int streaming_dedupe_cb(struct dupe_extents *dext, void *priv)
+{
+	GThreadPool *pool = priv;
+	GError *err = NULL;
+
+	g_thread_pool_push(pool, dext, &err);
+	if (err) {
+		eprintf("Fatal error while deduping: %s\n", err->message);
+		g_error_free(err);
+		return 1;
+	}
+	return 0;
+}
+
+void dedupe_streaming(struct dbhandle *db, bool whole_file)
+{
+	struct dedupe_counts counts = { 0ULL, };
+	GError *err = NULL;
+	GThreadPool *pool;
+
+	curr_dedupe_pass = 0;
+	whole_file_dedup = whole_file;
+	results_tree = NULL;
+	total_dedupe_passes = 0;
+	leading_spaces = 0;
+
+	qprintf("Using %u threads for dedupe phase\n", options.io_threads);
+
+	pool = g_thread_pool_new((GFunc) dedupe_worker, &counts,
+				 options.io_threads, TRUE, &err);
+	if (err) {
+		eprintf("Unable to create dedupe thread pool: %s\n",
+			err->message);
+		g_error_free(err);
+		return;
+	}
+
+	if (whole_file)
+		dbfile_stream_same_files(db, streaming_dedupe_cb, pool);
+	else
+		dbfile_stream_extent_hashes(db, streaming_dedupe_cb, pool);
+
+	g_thread_pool_free(pool, FALSE, TRUE);
+
+	vprintf("Kernel processed data (excludes target files): "
+		"%s\n", pretty_size(counts.kern_bytes));
+	printf("Comparison of extent info shows a net "
+	       "change in shared extents of: %s\n",
+	       pretty_size(counts.fiemap_bytes));
+}
+
+static int streaming_print_cb(struct dupe_extents *dext, void *priv)
+{
+	bool whole_file = *(bool *)priv;
+	struct extent *extent;
+	char *kind = whole_file ? "files" : "extents";
+
+	printf("Showing %u identical %s of length %s with id ",
+	       dext->de_num_dupes, kind, pretty_size(dext->de_len));
+	debug_print_digest_short(stdout, dext->de_hash);
+	printf("\n");
+	printf("Start\t\tFilename\n");
+	list_for_each_entry(extent, &dext->de_extents, e_list) {
+		printf("%s\t\"%s\"\n",
+		       pretty_size(extent->e_loff),
+		       extent->e_file->filename);
+	}
+
+	dupe_extents_free_standalone(dext);
+	return 0;
+}
+
+void print_dupes_streaming(struct dbhandle *db, bool whole_file)
+{
+	bool wf = whole_file;
+
+	if (whole_file)
+		dbfile_stream_same_files(db, streaming_print_cb, &wf);
+	else
+		dbfile_stream_extent_hashes(db, streaming_print_cb, &wf);
 }
 
 int fdupes_dedupe(void)

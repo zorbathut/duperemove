@@ -38,7 +38,7 @@
 declare_alloc_tracking(dupe_extents);
 declare_alloc_tracking(extent);
 
-static struct extent *alloc_extent(struct filerec *file, uint64_t loff)
+struct extent *alloc_extent(struct filerec *file, uint64_t loff)
 {
 	struct extent *e = calloc_extent(1);
 
@@ -167,8 +167,8 @@ static void insert_extent_list_free(struct dupe_extents *dext,
 	*e = NULL;
 }
 
-static struct dupe_extents *dupe_extents_new(unsigned char *digest,
-					     uint64_t len)
+struct dupe_extents *dupe_extents_new(unsigned char *digest,
+				     uint64_t len)
 {
 	struct dupe_extents *dext;
 
@@ -299,7 +299,6 @@ int insert_result(struct results_tree *res, unsigned char *digest,
 unsigned int remove_extent(struct results_tree *res, struct extent *extent)
 {
 	struct dupe_extents *p = extent->e_parent;
-	struct rb_node *n;
 	unsigned int result;
 
 again:
@@ -308,24 +307,31 @@ again:
 	result = p->de_num_dupes;
 
 	list_del_init(&extent->e_list);
-	rb_erase(&extent->e_node, &p->de_extents_root);
+	if (!RB_EMPTY_NODE(&extent->e_node))
+		rb_erase(&extent->e_node, &p->de_extents_root);
 	free_extent(extent);
-	res->num_extents--;
+	if (res)
+		res->num_extents--;
 
 	if (p->de_num_dupes == 1) {
 		/* It doesn't make sense to have one extent in a dup
 		 * list. */
-		abort_on(RB_EMPTY_ROOT(&p->de_extents_root));/* logic error */
-
-		n = rb_first(&p->de_extents_root);
-		extent = rb_entry(n, struct extent, e_node);
+		if (!RB_EMPTY_ROOT(&p->de_extents_root)) {
+			struct rb_node *n = rb_first(&p->de_extents_root);
+			extent = rb_entry(n, struct extent, e_node);
+		} else {
+			extent = list_first_entry(&p->de_extents,
+						  struct extent, e_list);
+		}
 		goto again;
 	}
 
 	if (p->de_num_dupes == 0) {
-		rb_erase(&p->de_node, &res->root);
+		if (res) {
+			rb_erase(&p->de_node, &res->root);
+			res->num_dupes--;
+		}
 		free_dupe_extents(p);
-		res->num_dupes--;
 	}
 	return result;
 }
@@ -341,7 +347,6 @@ void init_results_tree(struct results_tree *res)
 void dupe_extents_free(struct dupe_extents *dext, struct results_tree *res)
 {
 	struct extent *extent;
-	struct rb_node *n;
 	int count;
 
 	/*
@@ -349,10 +354,21 @@ void dupe_extents_free(struct dupe_extents *dext, struct results_tree *res)
 	 * than one extent remaining
 	 */
 	do {
-		n = rb_first(&dext->de_extents_root);
-		extent = rb_entry(n, struct extent, e_node);
+		extent = list_first_entry(&dext->de_extents,
+					  struct extent, e_list);
 		count = remove_extent(res, extent);
 	} while (count > 0);
+}
+
+void dupe_extents_free_standalone(struct dupe_extents *dext)
+{
+	struct extent *extent, *tmp;
+
+	list_for_each_entry_safe(extent, tmp, &dext->de_extents, e_list) {
+		list_del_init(&extent->e_list);
+		free_extent(extent);
+	}
+	free_dupe_extents(dext);
 }
 
 void free_results_tree(struct results_tree *res)

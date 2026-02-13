@@ -4,8 +4,13 @@
 #include <stdbool.h>
 #include "opt.h"
 
+struct dbhandle;
+
 void print_dupes_table(struct results_tree *res, bool whole_file);
 void dedupe_results(struct results_tree *res, bool whole_file);
+
+void dedupe_streaming(struct dbhandle *db, bool whole_file);
+void print_dupes_streaming(struct dbhandle *db, bool whole_file);
 
 int fdupes_dedupe(void);
 

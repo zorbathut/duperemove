@@ -160,6 +160,14 @@ int dbfile_describe_file(struct dbhandle *db, uint64_t ino, uint64_t subvol,
 				struct file *dbfile);
 int dbfile_load_same_files(struct dbhandle *db, struct results_tree *res);
 
+struct dupe_extents;
+typedef int (*dupe_group_cb)(struct dupe_extents *dext, void *priv);
+
+int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
+				void *priv);
+int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
+			     void *priv);
+
 int dbfile_rename_file(struct dbhandle *db, int64_t fileid, char *path);
 
 static inline void sqlite3_stmt_cleanup(void *p)

@@ -66,6 +66,21 @@ struct extent {
 #define extent_shared_bytes(_e)	((_e)->e_shared_bytes)
 
 /*
+ * Allocate a single extent (list-only, no tree insert).
+ */
+struct extent *alloc_extent(struct filerec *file, uint64_t loff);
+
+/*
+ * Allocate a new dupe_extents group (list-only, no tree insert).
+ */
+struct dupe_extents *dupe_extents_new(unsigned char *digest, uint64_t len);
+
+/*
+ * Free a standalone group and all its extents (no results_tree ops).
+ */
+void dupe_extents_free_standalone(struct dupe_extents *dext);
+
+/*
  * insert_result and insert_one_result use the object mutexes above
  * and are thread-safe.
  */

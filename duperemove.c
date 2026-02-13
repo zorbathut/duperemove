@@ -528,72 +528,65 @@ static void process_duplicates(struct dbhandle *db)
 {
 	int ret;
 	unsigned int max = get_max_dedupe_seq(db);
-	struct results_tree res;
-	struct hash_tree dups_tree;
 
 	if (dedupe_seq >= max)
 		return;
 
-	/* Spawn a dedicated thread pool to block-based lookup */
 	if (options.do_block_hash)
 		extents_search_init();
 
-	init_results_tree(&res);
-	init_hash_tree(&dups_tree);
-
+	/* Whole-file dedupe -- stream from SQL */
 	qprintf("Loading only identical files from hashfile.\n");
-	ret = dbfile_load_same_files(db, &res);
-	if (ret)
-		goto out;
-
 	if (options.run_dedupe)
-		dedupe_results(&res, true);
+		dedupe_streaming(db, true);
 	else
-		print_dupes_table(&res, true);
-
-	/* Reset the results_tree before loading extents or blocks */
-	free_results_tree(&res);
+		print_dupes_streaming(db, true);
 
 	if (!options.only_whole_files) {
-		init_results_tree(&res);
-
 		qprintf("Loading only duplicated hashes from hashfile.\n");
 
-		ret = dbfile_load_extent_hashes(db, &res);
-		if (ret)
-			goto out;
-
-		printf("Found %llu identical extents.\n", res.num_extents);
 		if (options.do_block_hash) {
+			/* Block hash needs results_tree for find_additional_dedupe */
+			struct results_tree res;
+			struct hash_tree dups_tree;
+			init_results_tree(&res);
+			init_hash_tree(&dups_tree);
+
+			ret = dbfile_load_extent_hashes(db, &res);
+			if (ret)
+				goto out_block;
+			printf("Found %llu identical extents.\n",
+			       res.num_extents);
+
 			ret = dbfile_load_block_hashes(db, &dups_tree);
 			if (ret)
-				goto out;
-
+				goto out_block;
 			ret = find_additional_dedupe(&res);
 			if (ret)
-				goto out;
-		}
+				goto out_block;
 
-		if (options.run_dedupe)
-			dedupe_results(&res, false);
-		else
-			print_dupes_table(&res, false);
+			if (options.run_dedupe)
+				dedupe_results(&res, false);
+			else
+				print_dupes_table(&res, false);
+out_block:
+			free_results_tree(&res);
+			free_hash_tree(&dups_tree);
+		} else {
+			/* Extent-only -- stream from SQL */
+			if (options.run_dedupe)
+				dedupe_streaming(db, false);
+			else
+				print_dupes_streaming(db, false);
+		}
 	}
 
 	if (options.run_dedupe) {
-		/*
-		 * Mark all batches as deduped so we don't repeat work
-		 * on the next run.
-		 */
 		dedupe_seq = max;
 		dbfile_cfg.dedupe_seq = dedupe_seq;
 		dbfile_cfg.blocksize = blocksize;
 		dbfile_sync_config(db, &dbfile_cfg);
 	}
-
-out:
-	free_results_tree(&res);
-	free_hash_tree(&dups_tree);
 
 	if (options.do_block_hash)
 		extents_search_free();

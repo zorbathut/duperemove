@@ -12,12 +12,14 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
+#include <time.h>
 
 #include "csum.h"
 #include "filerec.h"
 #include "hash-tree.h"
 #include "results-tree.h"
 #include "file_scan.h"
+#include "file_flags.h"
 #include "debug.h"
 
 #include "dbfile.h"
@@ -467,7 +469,8 @@ struct dbhandle *dbfile_open_handle(char *filename)
 "select digest, fileid, loff, len, poff from extents "			\
 "where (digest, len) in ( "						\
 "	select digest, len from extents "				\
-"	group by digest, len having count(*) > 1);"
+"	group by digest, len having count(*) > 1) "			\
+"order by digest, len;"
 	dbfile_prepare_stmt(get_duplicate_extents, GET_DUPLICATE_EXTENTS);
 
 /*
@@ -479,7 +482,8 @@ struct dbhandle *dbfile_open_handle(char *filename)
 "select id, size, digest, filename, flags from files "				\
 "where (digest, size) in ( "							\
 "	select digest, size from files "					\
-"	group by digest, size having count(*) > 1);"
+"	group by digest, size having count(*) > 1) "				\
+"order by digest, size;"
 	dbfile_prepare_stmt(get_duplicate_files, GET_DUPLICATE_FILES);
 
 #define GET_FILE_EXTENT							\
@@ -1544,6 +1548,230 @@ int dbfile_prune_unscanned_files(struct dbhandle *db)
 		perror_sqlite(ret, "executing sql");
 		return ret;
 	}
+
+	return 0;
+}
+
+int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
+				void *priv)
+{
+	int ret;
+	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_duplicate_extents;
+	uint64_t loff, poff, len;
+	int64_t fileid;
+	unsigned char *digest;
+	struct filerec *file;
+	uint64_t rows = 0, groups = 0;
+	struct dupe_extents *dext = NULL;
+	unsigned char cur_digest[DIGEST_LEN];
+	uint64_t cur_len = 0;
+	struct timespec ts_last;
+
+	memset(cur_digest, 0, DIGEST_LEN);
+	clock_gettime(CLOCK_MONOTONIC, &ts_last);
+
+	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+		digest = (unsigned char *)sqlite3_column_blob(stmt, 0);
+		fileid = sqlite3_column_int64(stmt, 1);
+		loff = sqlite3_column_int64(stmt, 2);
+		len = sqlite3_column_int64(stmt, 3);
+		poff = sqlite3_column_int64(stmt, 4);
+		rows++;
+
+		/* Detect group boundary */
+		if (dext &&
+		    (len != cur_len || memcmp(digest, cur_digest, DIGEST_LEN) != 0)) {
+			if (dext->de_num_dupes >= 2) {
+				groups++;
+				ret = cb(dext, priv);
+				if (ret)
+					return ret;
+			} else {
+				dupe_extents_free_standalone(dext);
+			}
+			dext = NULL;
+		}
+
+		if (!dext) {
+			dext = dupe_extents_new(digest, len);
+			if (!dext)
+				return ENOMEM;
+			memcpy(cur_digest, digest, DIGEST_LEN);
+			cur_len = len;
+		}
+
+		file = filerec_find(fileid);
+		if (!file) {
+			ret = dbfile_load_one_filerec(db, fileid, &file);
+			if (ret) {
+				eprintf("Error loading filerec (%"
+					PRIu64") from db\n", fileid);
+				if (dext)
+					dupe_extents_free_standalone(dext);
+				return ret;
+			}
+		}
+
+		{
+			struct extent *extent = alloc_extent(file, loff);
+			if (!extent) {
+				if (dext)
+					dupe_extents_free_standalone(dext);
+				return ENOMEM;
+			}
+			extent_poff(extent) = poff;
+			extent_plen(extent) = len;
+			extent_shared_bytes(extent) = 0;
+			extent->e_parent = dext;
+			dext->de_num_dupes++;
+			list_add_tail(&extent->e_list, &dext->de_extents);
+		}
+
+		if (!quiet) {
+			struct timespec ts_now;
+			clock_gettime(CLOCK_MONOTONIC, &ts_now);
+			if (ts_now.tv_sec > ts_last.tv_sec) {
+				printf("  Loading extents: %"PRIu64" rows, "
+				       "%"PRIu64" groups...\r",
+				       rows, groups);
+				fflush(stdout);
+				ts_last = ts_now;
+			}
+		}
+	}
+
+	/* Flush final group */
+	if (dext) {
+		if (dext->de_num_dupes >= 2) {
+			groups++;
+			ret = cb(dext, priv);
+			if (ret)
+				return ret;
+		} else {
+			dupe_extents_free_standalone(dext);
+		}
+	}
+
+	if (ret != SQLITE_DONE) {
+		perror_sqlite(ret, "streaming extent hashes");
+		return ret;
+	}
+
+	if (!quiet)
+		printf("  Loaded %"PRIu64" rows, %"PRIu64
+		       " groups.              \n", rows, groups);
+
+	return 0;
+}
+
+int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
+			     void *priv)
+{
+	int ret;
+	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_duplicate_files;
+	uint64_t size;
+	int64_t fileid;
+	unsigned char *digest;
+	unsigned int flags;
+	struct filerec *file;
+	const unsigned char *filename;
+	uint64_t rows = 0, groups = 0;
+	struct dupe_extents *dext = NULL;
+	unsigned char cur_digest[DIGEST_LEN];
+	uint64_t cur_size = 0;
+	struct timespec ts_last;
+
+	memset(cur_digest, 0, DIGEST_LEN);
+	clock_gettime(CLOCK_MONOTONIC, &ts_last);
+
+	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+		fileid = sqlite3_column_int64(stmt, 0);
+		size = sqlite3_column_int64(stmt, 1);
+		digest = (unsigned char *)sqlite3_column_blob(stmt, 2);
+		filename = sqlite3_column_text(stmt, 3);
+		flags = sqlite3_column_int(stmt, 4);
+		rows++;
+
+		if (flags & FILE_INLINED)
+			continue;
+
+		/* Detect group boundary */
+		if (dext &&
+		    (size != cur_size || memcmp(digest, cur_digest, DIGEST_LEN) != 0)) {
+			if (dext->de_num_dupes >= 2) {
+				groups++;
+				ret = cb(dext, priv);
+				if (ret)
+					return ret;
+			} else {
+				dupe_extents_free_standalone(dext);
+			}
+			dext = NULL;
+		}
+
+		if (!dext) {
+			dext = dupe_extents_new(digest, size);
+			if (!dext)
+				return ENOMEM;
+			memcpy(cur_digest, digest, DIGEST_LEN);
+			cur_size = size;
+		}
+
+		file = filerec_find(fileid);
+		if (!file) {
+			file = filerec_new((const char *)filename, fileid, size);
+			if (!file) {
+				if (dext)
+					dupe_extents_free_standalone(dext);
+				return ENOMEM;
+			}
+		}
+
+		{
+			struct extent *extent = alloc_extent(file, 0);
+			if (!extent) {
+				if (dext)
+					dupe_extents_free_standalone(dext);
+				return ENOMEM;
+			}
+			extent->e_parent = dext;
+			dext->de_num_dupes++;
+			list_add_tail(&extent->e_list, &dext->de_extents);
+		}
+
+		if (!quiet) {
+			struct timespec ts_now;
+			clock_gettime(CLOCK_MONOTONIC, &ts_now);
+			if (ts_now.tv_sec > ts_last.tv_sec) {
+				printf("  Loading files: %"PRIu64" rows, "
+				       "%"PRIu64" groups...\r",
+				       rows, groups);
+				fflush(stdout);
+				ts_last = ts_now;
+			}
+		}
+	}
+
+	/* Flush final group */
+	if (dext) {
+		if (dext->de_num_dupes >= 2) {
+			groups++;
+			ret = cb(dext, priv);
+			if (ret)
+				return ret;
+		} else {
+			dupe_extents_free_standalone(dext);
+		}
+	}
+
+	if (ret != SQLITE_DONE) {
+		perror_sqlite(ret, "streaming same files");
+		return ret;
+	}
+
+	if (!quiet)
+		printf("  Loaded %"PRIu64" rows, %"PRIu64
+		       " groups.              \n", rows, groups);
 
 	return 0;
 }
