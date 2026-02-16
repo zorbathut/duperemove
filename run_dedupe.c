@@ -57,6 +57,7 @@ void print_dupes_table(struct results_tree *res, bool whole_file)
 	struct rb_node *node = rb_first(root);
 	struct dupe_extents *dext;
 	struct extent *extent;
+	uint64_t estimated_savings = 0;
 	char *kind;
 
 	if (whole_file)
@@ -68,28 +69,35 @@ void print_dupes_table(struct results_tree *res, bool whole_file)
 	       "%s that might benefit from deduplication.\n",
 	       res->num_dupes, kind);
 
-	if (quiet || res->num_dupes == 0)
+	if (res->num_dupes == 0)
 		return;
 
-	while (1) {
-		if (node == NULL)
-			break;
-
+	while (node) {
 		dext = rb_entry(node, struct dupe_extents, de_node);
 
-		printf("Showing %u identical %s of length %s with id ",
-		       dext->de_num_dupes, kind, pretty_size(dext->de_len));
-		debug_print_digest_short(stdout, dext->de_hash);
-		printf("\n");
-		printf("Start\t\tFilename\n");
-		list_for_each_entry(extent, &dext->de_extents, e_list) {
-			printf("%s\t\"%s\"\n",
-			       pretty_size(extent->e_loff),
-			       extent->e_file->filename);
+		estimated_savings += dext->de_len * (dext->de_num_dupes - 1);
+
+		if (!quiet) {
+			printf("Showing %u identical %s of length %s with id ",
+			       dext->de_num_dupes, kind,
+			       pretty_size(dext->de_len));
+			debug_print_digest_short(stdout, dext->de_hash);
+			printf("\n");
+			printf("Start\t\tFilename\n");
+			list_for_each_entry(extent, &dext->de_extents,
+					    e_list) {
+				printf("%s\t\"%s\"\n",
+				       pretty_size(extent->e_loff),
+				       extent->e_file->filename);
+			}
 		}
 
 		node = rb_next(node);
 	}
+
+	if (estimated_savings)
+		printf("Estimated savings from %s deduplication: %s\n",
+		       kind, pretty_size(estimated_savings));
 }
 
 static void process_dedupe_results(struct dedupe_ctxt *ctxt,
@@ -682,19 +690,29 @@ void dedupe_streaming(struct dbhandle *db, bool whole_file)
 	       pretty_size(counts.fiemap_bytes));
 }
 
-static int streaming_print_cb(struct dupe_extents *dext,
-			      void *priv [[maybe_unused]])
+static int streaming_print_cb(struct dupe_extents *dext, void *priv)
 {
+	uint64_t *est = priv;
+	*est += dext->de_len * (dext->de_num_dupes - 1);
 	dupe_extents_free_standalone(dext);
 	return 0;
 }
 
 void print_dupes_streaming(struct dbhandle *db, bool whole_file)
 {
+	uint64_t estimated_savings = 0;
+
 	if (whole_file)
-		dbfile_stream_same_files(db, streaming_print_cb, NULL);
+		dbfile_stream_same_files(db, streaming_print_cb,
+					&estimated_savings);
 	else
-		dbfile_stream_extent_hashes(db, streaming_print_cb, NULL);
+		dbfile_stream_extent_hashes(db, streaming_print_cb,
+					    &estimated_savings);
+
+	if (estimated_savings)
+		printf("Estimated savings from %s deduplication: %s\n",
+		       whole_file ? "whole-file" : "extent",
+		       pretty_size(estimated_savings));
 }
 
 int fdupes_dedupe(void)
