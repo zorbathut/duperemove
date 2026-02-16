@@ -50,6 +50,8 @@ struct stmts {
 	sqlite3_stmt *get_max_dedupe_seq;
 	sqlite3_stmt *delete_unscanned_files;
 	sqlite3_stmt *rename_file;
+	sqlite3_stmt *count_extent_dupes;
+	sqlite3_stmt *count_file_dupes;
 };
 
 struct dbhandle {
@@ -169,6 +171,13 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 				void *priv);
 int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
 			     void *priv);
+
+typedef int (*dupe_count_cb)(unsigned char *digest, uint64_t len,
+			     unsigned int count, void *priv);
+int dbfile_count_extent_dupes(struct dbhandle *db, dupe_count_cb cb,
+			      void *priv);
+int dbfile_count_file_dupes(struct dbhandle *db, dupe_count_cb cb,
+			    void *priv);
 
 int dbfile_rename_file(struct dbhandle *db, int64_t fileid, char *path);
 

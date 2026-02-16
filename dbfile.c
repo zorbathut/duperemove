@@ -491,8 +491,10 @@ struct dbhandle *dbfile_open_handle(char *filename)
  * The streaming code discards groups with fewer than 2 members.
  */
 #define GET_ALL_EXTENTS							\
-"select digest, fileid, loff, len, poff from extents "			\
-"order by digest, len;"
+"select e.digest, e.fileid, e.loff, e.len, e.poff, "			\
+"f.filename, f.size "							\
+"from extents e join files f on f.id = e.fileid "			\
+"order by e.digest, e.len;"
 	dbfile_prepare_stmt(get_all_extents, GET_ALL_EXTENTS);
 
 #define GET_ALL_FILES							\
@@ -500,6 +502,19 @@ struct dbhandle *dbfile_open_handle(char *filename)
 "where digest is not null "						\
 "order by digest, size;"
 	dbfile_prepare_stmt(get_all_files, GET_ALL_FILES);
+
+#define COUNT_EXTENT_DUPES						\
+"select digest, len, count(*) from extents "				\
+"group by digest, len having count(*) > 1 "				\
+"order by digest, len;"
+	dbfile_prepare_stmt(count_extent_dupes, COUNT_EXTENT_DUPES);
+
+#define COUNT_FILE_DUPES						\
+"select digest, size, count(*) from files "				\
+"where digest is not null and not (flags & 1) "				\
+"group by digest, size having count(*) > 1 "				\
+"order by digest, size;"
+	dbfile_prepare_stmt(count_file_dupes, COUNT_FILE_DUPES);
 
 #define GET_FILE_EXTENT							\
 "select poff, loff, len from extents "					\
@@ -1613,9 +1628,10 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 {
 	int ret;
 	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt = db->stmts.get_all_extents;
-	uint64_t loff, poff, len;
+	uint64_t loff, poff, len, size;
 	int64_t fileid;
 	unsigned char *digest;
+	const unsigned char *filename;
 	struct filerec *file;
 	uint64_t rows = 0, groups = 0;
 	struct dupe_extents *dext = NULL;
@@ -1638,6 +1654,8 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 		loff = sqlite3_column_int64(stmt, 2);
 		len = sqlite3_column_int64(stmt, 3);
 		poff = sqlite3_column_int64(stmt, 4);
+		filename = sqlite3_column_text(stmt, 5);
+		size = sqlite3_column_int64(stmt, 6);
 		rows++;
 
 		/* Detect group boundary */
@@ -1664,21 +1682,18 @@ int dbfile_stream_extent_hashes(struct dbhandle *db, dupe_group_cb cb,
 
 		file = filerec_find(fileid);
 		if (!file) {
-			ret = dbfile_load_one_filerec(db, fileid, &file);
-			if (ret) {
-				eprintf("Error loading filerec (%"
-					PRIu64") from db\n", fileid);
-				if (dext)
-					dupe_extents_free_standalone(dext);
-				return ret;
+			file = filerec_new((const char *)filename,
+					   fileid, size);
+			if (!file) {
+				dupe_extents_free_standalone(dext);
+				return ENOMEM;
 			}
 		}
 
 		{
 			struct extent *extent = alloc_extent(file, loff);
 			if (!extent) {
-				if (dext)
-					dupe_extents_free_standalone(dext);
+				dupe_extents_free_standalone(dext);
 				return ENOMEM;
 			}
 			extent_poff(extent) = poff;
@@ -1823,6 +1838,112 @@ int dbfile_stream_same_files(struct dbhandle *db, dupe_group_cb cb,
 
 	if (ret != SQLITE_DONE) {
 		perror_sqlite(ret, "streaming same files");
+		return ret;
+	}
+
+	if (!quiet)
+		print_progress_complete(groups, &ts_start);
+
+	return 0;
+}
+
+int dbfile_count_extent_dupes(struct dbhandle *db, dupe_count_cb cb,
+			      void *priv)
+{
+	int ret;
+	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt =
+		db->stmts.count_extent_dupes;
+	unsigned char *digest;
+	uint64_t len;
+	unsigned int count;
+	uint64_t groups = 0;
+	unsigned char cur_digest[DIGEST_LEN];
+	struct timespec ts_start, ts_last;
+
+	memset(cur_digest, 0, DIGEST_LEN);
+	clock_gettime(CLOCK_MONOTONIC, &ts_start);
+	ts_last = ts_start;
+
+	qprintf("  Querying duplicate extents from hashfile...");
+	fflush(stdout);
+
+	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+		if (groups == 0)
+			qprintf(" done.\n");
+		digest = (unsigned char *)sqlite3_column_blob(stmt, 0);
+		len = sqlite3_column_int64(stmt, 1);
+		count = sqlite3_column_int(stmt, 2);
+
+		memcpy(cur_digest, digest, DIGEST_LEN);
+		groups++;
+
+		ret = cb(digest, len, count, priv);
+		if (ret)
+			return ret;
+
+		if (!quiet)
+			print_progress_bar(cur_digest, groups,
+					   &ts_start, &ts_last);
+	}
+
+	if (groups == 0)
+		qprintf(" done.\n");
+
+	if (ret != SQLITE_DONE) {
+		perror_sqlite(ret, "counting extent dupes");
+		return ret;
+	}
+
+	if (!quiet)
+		print_progress_complete(groups, &ts_start);
+
+	return 0;
+}
+
+int dbfile_count_file_dupes(struct dbhandle *db, dupe_count_cb cb,
+			    void *priv)
+{
+	int ret;
+	_cleanup_(sqlite3_reset_stmt) sqlite3_stmt *stmt =
+		db->stmts.count_file_dupes;
+	unsigned char *digest;
+	uint64_t size;
+	unsigned int count;
+	uint64_t groups = 0;
+	unsigned char cur_digest[DIGEST_LEN];
+	struct timespec ts_start, ts_last;
+
+	memset(cur_digest, 0, DIGEST_LEN);
+	clock_gettime(CLOCK_MONOTONIC, &ts_start);
+	ts_last = ts_start;
+
+	qprintf("  Querying duplicate files from hashfile...");
+	fflush(stdout);
+
+	while ((ret = sqlite3_step(stmt)) == SQLITE_ROW) {
+		if (groups == 0)
+			qprintf(" done.\n");
+		digest = (unsigned char *)sqlite3_column_blob(stmt, 0);
+		size = sqlite3_column_int64(stmt, 1);
+		count = sqlite3_column_int(stmt, 2);
+
+		memcpy(cur_digest, digest, DIGEST_LEN);
+		groups++;
+
+		ret = cb(digest, size, count, priv);
+		if (ret)
+			return ret;
+
+		if (!quiet)
+			print_progress_bar(cur_digest, groups,
+					   &ts_start, &ts_last);
+	}
+
+	if (groups == 0)
+		qprintf(" done.\n");
+
+	if (ret != SQLITE_DONE) {
+		perror_sqlite(ret, "counting file dupes");
 		return ret;
 	}
 

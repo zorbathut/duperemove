@@ -690,11 +690,11 @@ void dedupe_streaming(struct dbhandle *db, bool whole_file)
 	       pretty_size(counts.fiemap_bytes));
 }
 
-static int streaming_print_cb(struct dupe_extents *dext, void *priv)
+static int count_savings_cb(unsigned char *digest [[maybe_unused]],
+			    uint64_t len, unsigned int count, void *priv)
 {
 	uint64_t *est = priv;
-	*est += dext->de_len * (dext->de_num_dupes - 1);
-	dupe_extents_free_standalone(dext);
+	*est += len * (count - 1);
 	return 0;
 }
 
@@ -703,11 +703,11 @@ void print_dupes_streaming(struct dbhandle *db, bool whole_file)
 	uint64_t estimated_savings = 0;
 
 	if (whole_file)
-		dbfile_stream_same_files(db, streaming_print_cb,
+		dbfile_count_file_dupes(db, count_savings_cb,
 					&estimated_savings);
 	else
-		dbfile_stream_extent_hashes(db, streaming_print_cb,
-					    &estimated_savings);
+		dbfile_count_extent_dupes(db, count_savings_cb,
+					  &estimated_savings);
 
 	if (estimated_savings)
 		printf("Estimated savings from %s deduplication: %s\n",
